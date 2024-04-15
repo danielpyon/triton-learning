@@ -48,6 +48,7 @@ def _dropout(
     p,  # probability that an element of `x` is changed to zero
     BLOCK_SIZE: tl.constexpr,
 ):
+    
     pid = tl.program_id(axis=0)
     block_start = pid * BLOCK_SIZE
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
@@ -91,42 +92,61 @@ def dropout(x, x_keep, p):
 #
 # Let's put it all together.
 
-
+@triton_viz.trace
 @triton.jit
 def _seeded_dropout(
     x_ptr,
+    x_row_stride,
     output_ptr,
-    n_elements,
+    n_cols,
     p,
-    seed,
+    seeds,
     BLOCK_SIZE: tl.constexpr,
 ):
-    # compute memory offsets of elements handled by this instance
-    pid = tl.program_id(axis=0)
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
-    # load data from x
-    mask = offsets < n_elements
+    # parallelize over rows of input matrix
+    row = tl.program_id(axis=0)
+    seed = seeds[row]
+
+    # BLOCK_SIZE may be greater than n_cols
+    offsets = x_row_stride * row + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_cols
+    mask = tl.arange(0, BLOCK_SIZE) < n_cols
+
+    # print(offsets * mask)
+
+    # load x
     x = tl.load(x_ptr + offsets, mask=mask)
-    # randomly prune it
+
+    # dropout
     random = tl.rand(seed, offsets)
     x_keep = random > p
+
     # write-back
     output = tl.where(x_keep, x / (1 - p), 0.0)
     tl.store(output_ptr + offsets, output, mask=mask)
 
-
-def seeded_dropout(x, p, seed):
+def seeded_dropout(x, p, seeds):
+    n_rows, n_cols = x.shape
     output = torch.empty_like(x)
     assert x.is_contiguous()
-    n_elements = x.numel()
-    grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
-    _seeded_dropout[grid](x, output, n_elements, p, seed, BLOCK_SIZE=1024)
+
+    # note: grid is now number of rows, not numel / blocksize
+    _seeded_dropout[(n_rows,)](
+        x,
+        x.stride(0),
+        output,
+        n_cols,
+        p,
+        seeds,
+        BLOCK_SIZE=triton.next_power_of_2(n_cols)
+    )
+
     return output
 
 if __name__ == '__main__':
     device = 'cpu'
 
+    '''
     # Input tensor
     x = torch.randn(size=(10, ), device=device)
     # Dropout mask
@@ -139,22 +159,13 @@ if __name__ == '__main__':
         ["keep mask"] + x_keep.tolist(),
         ["output"] + output.tolist(),
     ]))
-
     '''
-    x = torch.randn(size=(10, ), device=device)
-    # Compare this to the baseline - dropout mask is never instantiated!
-    output = seeded_dropout(x, p=0.5, seed=123)
-    output2 = seeded_dropout(x, p=0.5, seed=123)
-    output3 = seeded_dropout(x, p=0.5, seed=512)
 
-    print(
-        tabulate.tabulate([
-            ["input"] + x.tolist(),
-            ["output (seed = 123)"] + output.tolist(),
-            ["output (seed = 123)"] + output2.tolist(),
-            ["output (seed = 512)"] + output3.tolist(),
-        ]))
-    '''
+    x = torch.randn(size=(3,5), device=device)
+    seeds = [123, 123, 512]
+    output = seeded_dropout(x, p=0.1, seeds=seeds)
+
+    print(output)
 
 # %%
 # Et Voilà! We have a triton kernel that applies the same dropout mask provided the seed is the same!
