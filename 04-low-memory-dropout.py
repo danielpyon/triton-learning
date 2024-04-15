@@ -34,11 +34,11 @@ In doing so, you will learn about:
 
 import tabulate
 import torch
-
+import triton_viz
 import triton
 import triton.language as tl
 
-
+@triton_viz.trace
 @triton.jit
 def _dropout(
     x_ptr,  # pointer to the input
@@ -69,19 +69,6 @@ def dropout(x, x_keep, p):
     _dropout[grid](x, x_keep, output, n_elements, p, BLOCK_SIZE=1024)
     return output
 
-
-# Input tensor
-x = torch.randn(size=(10, )).cuda()
-# Dropout mask
-p = 0.5
-x_keep = (torch.rand(size=(10, )) > p).to(torch.int32).cuda()
-#
-output = dropout(x, x_keep=x_keep, p=p)
-print(tabulate.tabulate([
-    ["input"] + x.tolist(),
-    ["keep mask"] + x_keep.tolist(),
-    ["output"] + output.tolist(),
-]))
 
 # %%
 # Seeded dropout
@@ -137,20 +124,37 @@ def seeded_dropout(x, p, seed):
     _seeded_dropout[grid](x, output, n_elements, p, seed, BLOCK_SIZE=1024)
     return output
 
+if __name__ == '__main__':
+    device = 'cpu'
 
-x = torch.randn(size=(10, )).cuda()
-# Compare this to the baseline - dropout mask is never instantiated!
-output = seeded_dropout(x, p=0.5, seed=123)
-output2 = seeded_dropout(x, p=0.5, seed=123)
-output3 = seeded_dropout(x, p=0.5, seed=512)
+    # Input tensor
+    x = torch.randn(size=(10, ), device=device)
+    # Dropout mask
+    p = 0.5
+    x_keep = (torch.rand(size=(10, ), device=device) > p).to(torch.int32)
 
-print(
-    tabulate.tabulate([
+    output = dropout(x, x_keep=x_keep, p=p)
+    print(tabulate.tabulate([
         ["input"] + x.tolist(),
-        ["output (seed = 123)"] + output.tolist(),
-        ["output (seed = 123)"] + output2.tolist(),
-        ["output (seed = 512)"] + output3.tolist(),
+        ["keep mask"] + x_keep.tolist(),
+        ["output"] + output.tolist(),
     ]))
+
+    '''
+    x = torch.randn(size=(10, ), device=device)
+    # Compare this to the baseline - dropout mask is never instantiated!
+    output = seeded_dropout(x, p=0.5, seed=123)
+    output2 = seeded_dropout(x, p=0.5, seed=123)
+    output3 = seeded_dropout(x, p=0.5, seed=512)
+
+    print(
+        tabulate.tabulate([
+            ["input"] + x.tolist(),
+            ["output (seed = 123)"] + output.tolist(),
+            ["output (seed = 123)"] + output2.tolist(),
+            ["output (seed = 512)"] + output3.tolist(),
+        ]))
+    '''
 
 # %%
 # Et Voilà! We have a triton kernel that applies the same dropout mask provided the seed is the same!
